@@ -8,9 +8,8 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 
 1. **Stops** the current UVP6 acquisition (`$stop;`)
 2. **Updates** the file listing from the SD card (`sdlist` → `tree.txt`)
-3. **Compares** the remote listing against files already downloaded locally
-4. **Downloads** only new/missing files (`sddump`)
-5. **Reboots** the UVP6 to resume acquisition
+3. **Downloads** only new/missing files (`sddump` — compares automatically)
+4. **Reboots** the UVP6 to resume acquisition
 
 ---
 
@@ -73,13 +72,13 @@ OCTOS_DIR=C:\OctOS_2024_00
 Open a terminal in the `automation/` folder and run:
 
 ```bat
-daily_download.bat
+.\daily_download.bat
 ```
 
 Or directly with PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -NoProfile -File daily_download.ps1
+.\daily_download.ps1
 ```
 
 Watch the console output. After completion, check:
@@ -120,10 +119,6 @@ Located at the OctOS root folder. Shows the result of the last run at a glance:
 ========================================
 Last run       : 2026-03-13 04:00:12
 Status         : [OK] OK
-SD files       : 149158
-New            : 47
-Downloaded     : 47
-Failed         : 0
 ========================================
 ```
 
@@ -158,31 +153,6 @@ EMAIL_ONLY_ON_ERROR=true
 ```
 
 Leave `SMTP_SERVER` empty to disable email notifications entirely.
-
----
-
-## How the comparison works
-
-The script relies on the file structure mirrored between the UVP6 SD card and the local `filemanager/` folder:
-
-```
-filemanager/
-├── tree.txt                          ← full listing from SD card
-├── AUTOCHECK/
-├── 2025/
-│   ├── 05-30/
-│   │   ├── 20250530-120000/
-│   │   │   ├── 20250530-120000_data.txt
-│   │   │   └── 1/
-│   │   │       ├── 20250530-120012-1.vig
-│   │   │       └── ...
-│   │   └── 20250530-180000/
-│   │       └── ...
-│   ├── 05-31/
-│   └── ...
-```
-
-For each line in `tree.txt` (a relative path like `2025/05-30/20250530-120000/1/20250530-120012-1.vig`), the script checks whether the corresponding file already exists under `filemanager/`. If not, it is added to the download list (`new_files.txt`), which is then passed to `sddump`.
 
 ---
 
