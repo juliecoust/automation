@@ -483,6 +483,24 @@ try {
 }
 catch {
     Write-Log "Run failed: $_" "ERROR"
+
+    # ---- Safety reboot: ensure UVP6 resumes acquisition even on error ----
+    if ($session -and -not $session.HasExited) {
+        try {
+            Write-Log "  -> Sending safety reboot to resume UVP6 acquisition..."
+            $session.WriteLine("reboot")
+            Write-Log "  -> Sent: reboot"
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
+            if ($ok) {
+                Write-Log "  <- Safety reboot successful (`$startack; received)."
+            } else {
+                Write-Log "  <- Safety reboot: no `$startack; within 180s." "WARN"
+            }
+        }
+        catch {
+            Write-Log "  <- Safety reboot failed: $_" "WARN"
+        }
+    }
 }
 finally {
     if ($session) {
