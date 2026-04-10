@@ -1,15 +1,13 @@
 <#
 .SYNOPSIS
-    Simple daily UVP6 download via OctOS.
+    Daily UVP6 SD card format (cleanup) via OctOS.
 
 .DESCRIPTION
     Runs one OctOS session with strict sequential commands:
-    1) $stop; (wait for $stopack;)
-    2) $stop; (wait for $stopack;)
-    3) sdlist <HOST_IP> (wait for [SDLIST]: EXIT)
-    4) sddump or sddump <TEST_TREE_FILE> (wait for [SDDUMP]: EXIT)
-    5) reboot (wait for $startack;)
-    6) quit
+    1) $stop; (x3, wait for $stopack;)
+    2) sdformat (wait for [SDFORMAT]: EXIT)
+    3) reboot (wait for $startack;)
+    4) quit
 
     Each step runs only if the previous one succeeds.
 #>
@@ -276,20 +274,10 @@ function Write-Log {
     }
 }
 
-function New-Step {
-    param(
-        [string]$Name,
-        [string]$Command,
-        [string]$WaitFor = "",
-        [int]$TimeoutSec = 30
-    )
-
-    return [PSCustomObject]@{
-        Name = $Name
-        Command = $Command
-        WaitFor = $WaitFor
-        TimeoutSec = $TimeoutSec
-    }
+function Strip-Ansi {
+    param([string]$Text)
+    # Remove ANSI/VT100 escape sequences (CSI, OSC, simple escapes).
+    return $Text -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', '' -replace '\x1b[^\[\]][a-zA-Z]', ''
 }
 
 function Wait-ForMarker {
@@ -301,7 +289,8 @@ function Wait-ForMarker {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
-        if ($Session.OutputBuffer.ToString() -match $MarkerRegex) {
+        $clean = Strip-Ansi $Session.OutputBuffer.ToString()
+        if ($clean -match $MarkerRegex) {
             return $true
         }
 
@@ -315,160 +304,28 @@ function Wait-ForMarker {
     return $false
 }
 
-function Invoke-OctOSSession {
+function Wait-ForMarkerCapture {
     param(
-        [string]$OctOSExe,
-        [string]$WorkDir,
-        [string]$Arguments,
-        [object[]]$Steps,
-        [int]$SessionTimeoutSec,
-        [int]$DelayBetweenCommandsSec,
-        [int]$DataWaitTimeoutSec = 15
+        [ConPtySession]$Session,
+        [string]$MarkerRegex,
+        [int]$TimeoutSec
     )
 
-    $result = [PSCustomObject]@{
-        Success = $false
-        Output = ""
-        Errors = New-Object System.Collections.Generic.List[string]
-    }
-
-    $session = $null
-
-    try {
-        # Dedicated log file for raw OctOS output.
-        $octosLogDir = Split-Path $script:LogFile -Parent
-        $script:OctosOutputLog = Join-Path $octosLogDir ("octos_output_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
-        Write-Log "OctOS output log: $($script:OctosOutputLog)"
-
-        $commandLine = "`"$OctOSExe`" $Arguments"
-        $session = New-Object ConPtySession
-        Write-Log "Launching OctOS via ConPTY: $commandLine"
-        $session.Start($OctOSExe, $commandLine, $WorkDir, $script:OctosOutputLog)
-        Write-Log "  OctOS PID: $($session.ProcessId)"
-
-        # Wait for OctOS to be ready (look for [ME]: prompt).
-        Write-Log "  .. Waiting for OctOS to be ready (looking for '[ME]:')..."
-        $ready = Wait-ForMarker -Session $session -MarkerRegex '\[ME\]:' -TimeoutSec 120
-        if (-not $ready) {
-            $msg = "OctOS never became ready (no [ME]: prompt within 120s)."
-            $result.Errors.Add($msg)
-            Write-Log $msg "ERROR"
-            return $result
-        }
-        Write-Log "  <- OctOS is ready."
-
-        # Send Enter to clear any startup prompt.
-        $session.WriteLine("")
-        Write-Log "  -> Sent: [Enter]"
-
-        # ---- Check for data lines; reboot if UVP6 is not sending data ----
-        Write-Log "  .. Waiting ${DataWaitTimeoutSec}s for data lines (LPM_DATA/BLACK_DATA)..."
-        $hasData = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec $DataWaitTimeoutSec
-        if (-not $hasData) {
-            Write-Log "  <- No data lines received. Sending reboot to wake UVP6..." "WARN"
-            $session.WriteLine("reboot")
-            Write-Log "  -> Sent: reboot"
-            Write-Log "  .. Waiting for `$startack;..."
-            $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
-            if (-not $ok) {
-                $msg = "Timeout waiting for `$startack; after pre-reboot."
-                $result.Errors.Add($msg)
-                Write-Log $msg "ERROR"
-                return $result
-            }
-            Write-Log "  <- Received `$startack;"
-
-            Write-Log "  .. Waiting for data lines after reboot..."
-            $hasData2 = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec 60
-            if (-not $hasData2) {
-                $msg = "UVP6 still not sending data after reboot."
-                $result.Errors.Add($msg)
-                Write-Log $msg "ERROR"
-                return $result
-            }
-            Write-Log "  <- Data lines confirmed after reboot."
-        } else {
-            Write-Log "  <- Data lines detected, UVP6 is active."
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        $clean = Strip-Ansi $Session.OutputBuffer.ToString()
+        if ($clean -match $MarkerRegex) {
+            return $Matches
         }
 
-        $firstStopSentAt = $null
-
-        foreach ($step in $Steps) {
-            if ($session.HasExited) {
-                $msg = "OctOS exited before step '$($step.Name)'."
-                $result.Errors.Add($msg)
-                Write-Log $msg "ERROR"
-                break
-            }
-
-            Start-Sleep -Seconds $DelayBetweenCommandsSec
-            $session.WriteLine($step.Command)
-            Write-Log "  -> Sent ($($step.Name)): $($step.Command)"
-
-            if ($step.Command -eq '$stop;') {
-                if (-not $firstStopSentAt) {
-                    $firstStopSentAt = Get-Date
-                } else {
-                    $deltaSec = ((Get-Date) - $firstStopSentAt).TotalSeconds
-                    if ($deltaSec -gt 30) {
-                        $msg = "Second stop sent too late (${deltaSec:N1}s after first, max 30s)."
-                        $result.Errors.Add($msg)
-                        Write-Log $msg "ERROR"
-                        break
-                    }
-                }
-            }
-
-            if ($step.WaitFor) {
-                Write-Log "  .. Waiting marker for '$($step.Name)': $($step.WaitFor) (timeout $($step.TimeoutSec)s)"
-                $ok = Wait-ForMarker -Session $session -MarkerRegex $step.WaitFor -TimeoutSec $step.TimeoutSec
-                if ($ok) {
-                    Write-Log "  <- Marker received for '$($step.Name)': $($step.WaitFor)"
-                } else {
-                    $msg = "Marker timeout for '$($step.Name)': $($step.WaitFor)"
-                    $result.Errors.Add($msg)
-                    Write-Log $msg "ERROR"
-                    break
-                }
-            }
-        }
-
-        # Give OctOS a moment to finish after last command.
-        if (-not $session.HasExited) {
-            Start-Sleep -Milliseconds 500
-        }
-
-        if (-not $session.WaitForExit($SessionTimeoutSec * 1000)) {
-            $msg = "Session timeout after $SessionTimeoutSec s."
-            $result.Errors.Add($msg)
-            Write-Log $msg "ERROR"
-            $session.Kill()
+        if ($Session.HasExited) {
+            return $null
         }
 
         Start-Sleep -Milliseconds 400
-
-        $stdout = $session.OutputBuffer.ToString()
-        Write-Log "Full OctOS output saved to: $($script:OctosOutputLog)"
-        Write-Log "OctOS finished (exit code: $($session.ExitCode))"
-
-        $result.Output = $stdout
-        if ($session.ExitCode -eq 0 -and $result.Errors.Count -eq 0) {
-            $result.Success = $true
-        } else {
-            if ($session.ExitCode -ne 0) {
-                $result.Errors.Add("OctOS exit code: $($session.ExitCode)")
-            }
-            $result.Success = $false
-        }
-
-        return $result
     }
-    finally {
-        if ($session) {
-            if (-not $session.HasExited) { $session.Kill() }
-            $session.Dispose()
-        }
-    }
+
+    return $null
 }
 
 # ---------------------------
@@ -484,10 +341,7 @@ $COM_PORT = $cfg["COM_PORT"]
 $HOST_IP = $cfg["HOST_IP"]
 $BAUDRATE = $cfg["BAUDRATE"]
 $WAIT_SECS = if ($cfg["WAIT_BETWEEN_COMMANDS"]) { [int]$cfg["WAIT_BETWEEN_COMMANDS"] } else { 3 }
-$SDLIST_TMO = if ($cfg["SDLIST_TIMEOUT"]) { [int]$cfg["SDLIST_TIMEOUT"] } else { 600 }
-$SDDUMP_TMO = if ($cfg["SDDUMP_TIMEOUT"]) { [int]$cfg["SDDUMP_TIMEOUT"] } else { 3600 }
-$DATA_WAIT = if ($cfg["DATA_WAIT_TIMEOUT"]) { [int]$cfg["DATA_WAIT_TIMEOUT"] } else { 15 }
-$TEST_TREE_FILE = $cfg["TEST_TREE_FILE"]
+$SDFORMAT_TMO = if ($cfg["SDFORMAT_TIMEOUT"]) { [int]$cfg["SDFORMAT_TIMEOUT"] } else { 3600 }
 
 $octosExe = Join-Path $OCTOS_DIR "bin\OctOS.exe"
 if (-not (Test-Path $octosExe)) {
@@ -498,56 +352,156 @@ $logDir = Join-Path $OCTOS_DIR "logs"
 if (-not (Test-Path $logDir)) {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 }
-$script:LogFile = Join-Path $logDir ("download_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+$script:LogFile = Join-Path $logDir ("cleanup_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
 
 Write-Log "================================================================="
-Write-Log "  UVP6 DAILY DOWNLOAD - Start"
+Write-Log "  UVP6 DAILY CLEANUP (SD FORMAT) - Start"
 Write-Log "================================================================="
 Write-Log "Configuration: COM$COM_PORT | Host=$HOST_IP | Baud=$BAUDRATE"
 
 $octosArgs = "$COM_PORT"
 if ($BAUDRATE) { $octosArgs += " $BAUDRATE" }
 
-$sddumpCommand = if ($TEST_TREE_FILE) {
-    "sddump $TEST_TREE_FILE"
-} else {
-    # For quick tests you can set TEST_TREE_FILE in .env.
-    "sddump tree_for_test.txt"
+$sessionTimeout = [Math]::Max($SDFORMAT_TMO + 300, 900)
+$session = $null
+$success = $false
+
+try {
+    # Dedicated log file for raw OctOS output.
+    $script:OctosOutputLog = Join-Path $logDir ("octos_output_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+    Write-Log "OctOS output log: $($script:OctosOutputLog)"
+
+    $commandLine = "`"$octosExe`" $octosArgs"
+    $session = New-Object ConPtySession
+    Write-Log "Launching OctOS via ConPTY: $commandLine"
+    $session.Start($octosExe, $commandLine, $OCTOS_DIR, $script:OctosOutputLog)
+    Write-Log "  OctOS PID: $($session.ProcessId)"
+
+    # Wait for OctOS to be ready.
+    Write-Log "  .. Waiting for OctOS to be ready (looking for '[ME]:')..."
+    $ready = Wait-ForMarker -Session $session -MarkerRegex '\[ME\]:' -TimeoutSec 120
+    if (-not $ready) {
+        throw "OctOS never became ready (no [ME]: prompt within 120s)."
+    }
+    Write-Log "  <- OctOS is ready."
+
+    $session.WriteLine("")
+    Write-Log "  -> Sent: [Enter]"
+
+    # ---- Check for data lines; reboot if UVP6 is not sending data ----
+    $DATA_WAIT = if ($cfg["DATA_WAIT_TIMEOUT"]) { [int]$cfg["DATA_WAIT_TIMEOUT"] } else { 15 }
+    Write-Log "  .. Waiting ${DATA_WAIT}s for data lines (LPM_DATA/BLACK_DATA)..."
+    $hasData = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec $DATA_WAIT
+    if (-not $hasData) {
+        Write-Log "  <- No data lines received. Sending reboot to wake UVP6..." "WARN"
+        $session.WriteLine("reboot")
+        Write-Log "  -> Sent: reboot"
+        Write-Log "  .. Waiting for `$startack;..."
+        $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
+        if (-not $ok) { throw "Timeout waiting for `$startack; after pre-reboot." }
+        Write-Log "  <- Received `$startack;"
+
+        Write-Log "  .. Waiting for data lines after reboot..."
+        $hasData2 = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec 60
+        if (-not $hasData2) {
+            throw "UVP6 still not sending data after reboot."
+        }
+        Write-Log "  <- Data lines confirmed after reboot."
+    } else {
+        Write-Log "  <- Data lines detected, UVP6 is active."
+    }
+
+    # ---- Step 1-3: $stop; (x3) ----
+    $firstStopSentAt = $null
+    foreach ($i in 1..3) {
+        Start-Sleep -Seconds $WAIT_SECS
+        $session.WriteLine('$stop;')
+        Write-Log "  -> Sent (stop_$i): `$stop;"
+        if ($i -eq 1) { $firstStopSentAt = Get-Date }
+        if ($i -eq 3) {
+            Write-Log "  .. Waiting for `$stopack;..."
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '\$stopack;' -TimeoutSec 30
+            if (-not $ok) { throw "Timeout waiting for `$stopack;" }
+            Write-Log "  <- Received `$stopack;"
+        }
+    }
+
+    # ---- Step 4: sdformat (interactive confirmation) ----
+    Start-Sleep -Seconds $WAIT_SECS
+    $session.WriteLine("sdformat")
+    Write-Log "  -> Sent: sdformat"
+
+    # Wait for the confirmation prompt: "Enter code XXXX to proceed"
+    Write-Log "  .. Waiting for sdformat confirmation prompt..."
+    $match = Wait-ForMarkerCapture -Session $session -MarkerRegex 'Enter code (\d+)\s*to proceed' -TimeoutSec 120
+    if (-not $match) {
+        throw "Timeout waiting for sdformat confirmation prompt."
+    }
+    $confirmCode = $match[1]
+    Write-Log "  <- Confirmation prompt received (code: $confirmCode)"
+
+    # Send the confirmation code
+    Start-Sleep -Seconds $WAIT_SECS
+    $session.WriteLine($confirmCode)
+    Write-Log "  -> Sent confirmation code: $confirmCode"
+
+    # Wait for format to complete — match the capacity report that follows "Done !"
+    Write-Log "  .. Waiting for format to complete (timeout ${SDFORMAT_TMO}s)..."
+    $ok = Wait-ForMarker -Session $session -MarkerRegex 'Storage capacity in Mb' -TimeoutSec $SDFORMAT_TMO
+    if (-not $ok) {
+        throw "Timeout waiting for sdformat to complete."
+    }
+    Write-Log "  <- SD format completed successfully."
+
+    # ---- Step 5: reboot ----
+    Start-Sleep -Seconds $WAIT_SECS
+    $session.WriteLine("reboot")
+    Write-Log "  -> Sent: reboot"
+    Write-Log "  .. Waiting for `$startack;..."
+    $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
+    if (-not $ok) { throw "Timeout waiting for `$startack; after reboot." }
+    Write-Log "  <- Received `$startack;"
+
+    # ---- Step 6: quit ----
+    Start-Sleep -Seconds $WAIT_SECS
+    $session.WriteLine("quit")
+    Write-Log "  -> Sent: quit"
+
+    # Wait for OctOS to exit.
+    if (-not $session.WaitForExit($sessionTimeout * 1000)) {
+        Write-Log "Session timeout after $sessionTimeout s." "ERROR"
+        $session.Kill()
+        throw "Session timeout."
+    }
+
+    Write-Log "OctOS finished (exit code: $($session.ExitCode))"
+    if ($session.ExitCode -ne 0) {
+        throw "OctOS exit code: $($session.ExitCode)"
+    }
+
+    $success = $true
+}
+catch {
+    Write-Log "Run failed: $_" "ERROR"
+}
+finally {
+    if ($session) {
+        if (-not $session.HasExited) { $session.Kill() }
+        $session.Dispose()
+    }
 }
 
-$steps = @(
-    (New-Step -Name "stop_1" -Command '$stop;' -TimeoutSec 30)
-    (New-Step -Name "stop_2" -Command '$stop;' -TimeoutSec 30)
-    (New-Step -Name "stop_3" -Command '$stop;' -WaitFor '\$stopack;' -TimeoutSec 30)
-    (New-Step -Name "sdlist" -Command "sdlist $HOST_IP" -WaitFor '\[SDLIST\].*EXIT' -TimeoutSec $SDLIST_TMO)
-    (New-Step -Name "sddump" -Command $sddumpCommand -WaitFor '\[SDDUMP\].*EXIT' -TimeoutSec $SDDUMP_TMO)
-    (New-Step -Name "reboot" -Command 'reboot' -WaitFor '\$startack;' -TimeoutSec 180)
-    (New-Step -Name "quit" -Command 'quit')
-)
-
-$sessionTimeout = [Math]::Max($SDDUMP_TMO + 300, 900)
-$run = Invoke-OctOSSession `
-    -OctOSExe $octosExe `
-    -WorkDir $OCTOS_DIR `
-    -Arguments $octosArgs `
-    -Steps $steps `
-    -SessionTimeoutSec $sessionTimeout `
-    -DelayBetweenCommandsSec $WAIT_SECS `
-    -DataWaitTimeoutSec $DATA_WAIT
-
-if ($run.Success) {
+if ($success) {
     Write-Log "All steps completed successfully."
     Write-Log "Log: $script:LogFile"
     Write-Log "================================================================="
-    Write-Log "  UVP6 DAILY DOWNLOAD - End (OK)"
+    Write-Log "  UVP6 DAILY CLEANUP (SD FORMAT) - End (OK)"
     Write-Log "================================================================="
     exit 0
 }
 
-$errorText = if ($run.Errors.Count -gt 0) { $run.Errors -join " | " } else { "Unknown error" }
-Write-Log "Run failed: $errorText" "ERROR"
 Write-Log "Log: $script:LogFile"
 Write-Log "================================================================="
-Write-Log "  UVP6 DAILY DOWNLOAD - End (ERROR)"
+Write-Log "  UVP6 DAILY CLEANUP (SD FORMAT) - End (ERROR)"
 Write-Log "================================================================="
 exit 1

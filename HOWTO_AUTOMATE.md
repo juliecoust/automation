@@ -17,10 +17,12 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 
 | File                 | Purpose                                                 |
 | -------------------- | ------------------------------------------------------- |
-| `.env`               | Configuration (COM port, IPs, timeouts, email settings) |
-| `daily_download.ps1` | Main PowerShell script — all logic lives here           |
-| `daily_download.bat` | Launcher for Task Scheduler or double-click             |
-| `HOWTO_AUTOMATE.md`  | This documentation                                      |
+| `.env`               | Configuration (COM port, IPs, timeouts, email settings)  |
+| `daily_download.ps1` | Main PowerShell script — download logic                  |
+| `daily_download.bat` | Launcher for Task Scheduler or double-click (download)   |
+| `daily_cleanup.ps1`  | Main PowerShell script — SD format (cleanup) logic       |
+| `daily_cleanup.bat`  | Launcher for Task Scheduler or double-click (cleanup)    |
+| `HOWTO_AUTOMATE.md`  | This documentation                                       |
 
 Generated at runtime (inside `OCTOS_DIR`):
 
@@ -97,6 +99,20 @@ Watch the console output. After completion, check:
    - Program: `C:\OctOS_2024_00\automation\daily_download.bat`
    - Start in: `C:\OctOS_2024_00\automation\`
 6. Finish
+
+#### Daily Cleanup (SD Format)
+
+Repeat the steps above with:
+- Name: `UVP6 Daily Cleanup`
+- Program: `C:\OctOS_2024_00\automation\daily_cleanup.bat`
+- Start in: `C:\OctOS_2024_00\automation\`
+
+The cleanup script runs the OctOS `sdformat` command which:
+1. **Stops** the current UVP6 acquisition (`$stop;`)
+2. **Formats** the SD card (`sdformat`)
+3. **Reboots** the UVP6 to resume acquisition
+
+Configure the format timeout via `SDFORMAT_TIMEOUT` in `.env` (default: 3600 s).
 
 #### Recommended settings (in task Properties)
 
