@@ -1,15 +1,32 @@
-# UVP6 Automated Daily Download — How-To Guide
+# UVP6 Automated Download & Cleanup — How-To Guide
 
 ## Overview
 
-This automation suite connects to a UVP6 underwater camera via **OctOS**, downloads new data files daily, and provides monitoring tools to track download health over time.
+This automation suite connects to a UVP6 underwater camera via **OctOS**, downloads new data files, uploads them to an FTP server, and performs verified SD card cleanup on a weekly schedule.
 
-### What it does (step by step)
+### Schedule
 
-1. **Stops** the current UVP6 acquisition (`$stop;`)
-2. **Updates** the file listing from the SD card (`sdlist` → `tree.txt`)
-3. **Downloads** only new/missing files (`sddump` — compares automatically)
-4. **Reboots** the UVP6 to resume acquisition
+| When | What | Script |
+|------|------|--------|
+| **Daily** | Download new files from UVP6, then upload to FTP | `daily_run.bat` |
+| **Weekly** | Verify all files are downloaded + on FTP, then format SD | `weekly_cleanup.bat` |
+
+### Daily workflow (automatic)
+
+1. **Stop** the UVP6 acquisition
+2. **sdlist** — get fresh file listing from SD card
+3. **sddump** — download only new/missing files
+4. **Reboot** UVP6 to resume acquisition
+5. **FTP upload** — upload only newly downloaded files
+6. **Copy** new files to Desktop\data
+
+### Weekly workflow (automatic, safety-first)
+
+1. **sdlist** — get fresh file listing from SD card
+2. **Verify LOCAL** — check every file in tree.txt exists in filemanager/
+3. **Verify FTP** — check every file in tree.txt exists on the FTP server
+4. **ONLY if 100% verified** → **sdformat** to clean the SD card
+5. If ANY file is missing → **ABORT** (no format, no data loss)
 
 ---
 
@@ -20,8 +37,13 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 | `.env`               | Configuration (COM port, IPs, timeouts, email settings)  |
 | `daily_download.ps1` | Main PowerShell script — download logic                  |
 | `daily_download.bat` | Launcher for Task Scheduler or double-click (download)   |
-| `daily_cleanup.ps1`  | Main PowerShell script — SD format (cleanup) logic       |
-| `daily_cleanup.bat`  | Launcher for Task Scheduler or double-click (cleanup)    |
+| `daily_ftp_upload.ps1` | FTP upload of new files to remote server                |
+| `daily_ftp_upload.bat` | Launcher for FTP upload only                            |
+| `daily_run.bat`      | **Daily launcher** — runs download then FTP upload        |
+| `weekly_cleanup.ps1` | Weekly verify + SD format (safety-first cleanup)          |
+| `weekly_cleanup.bat` | **Weekly launcher** — verify & format                     |
+| `daily_cleanup.ps1`  | Standalone SD format (no verification — use weekly instead)|
+| `daily_cleanup.bat`  | Launcher for standalone cleanup                           |
 | `HOWTO_AUTOMATE.md`  | This documentation                                       |
 
 Generated at runtime (inside `OCTOS_DIR`):
@@ -87,32 +109,47 @@ Watch the console output. After completion, check:
 - `status.txt` in the OctOS root folder
 - `logs/` folder for the detailed log
 
-### 3. Schedule for daily execution
+### 3. Schedule with Task Scheduler
 
-#### Using Windows Task Scheduler
+You need **two** scheduled tasks:
+
+#### Task 1: Daily Download + FTP Upload
 
 1. Open **Task Scheduler** (`taskschd.msc`)
 2. Click **Create Basic Task**
-3. Name: `UVP6 Daily Download`
+3. Name: `UVP6 Daily Run`
 4. Trigger: **Daily**, set your preferred time (e.g. 03:00)
 5. Action: **Start a program**
-   - Program: `C:\OctOS_2024_00\automation\daily_download.bat`
-   - Start in: `C:\OctOS_2024_00\automation\`
+   - Program: path to `daily_run.bat`
+   - Start in: the `automation\` folder
 6. Finish
 
-#### Daily Cleanup (SD Format)
+This runs the download first, then automatically uploads new files to FTP.
 
-Repeat the steps above with:
-- Name: `UVP6 Daily Cleanup`
-- Program: `C:\OctOS_2024_00\automation\daily_cleanup.bat`
-- Start in: `C:\OctOS_2024_00\automation\`
+#### Task 2: Weekly Verify & Cleanup
 
-The cleanup script runs the OctOS `sdformat` command which:
-1. **Stops** the current UVP6 acquisition (`$stop;`)
-2. **Formats** the SD card (`sdformat`)
-3. **Reboots** the UVP6 to resume acquisition
+1. Create another task
+2. Name: `UVP6 Weekly Cleanup`
+3. Trigger: **Weekly**, pick a day (e.g. Sunday at 06:00)
+4. Action: **Start a program**
+   - Program: path to `weekly_cleanup.bat`
+   - Start in: the `automation\` folder
+5. Finish
 
-Configure the format timeout via `SDFORMAT_TIMEOUT` in `.env` (default: 3600 s).
+This script **refuses to format** unless every file on the SD card has been confirmed present both locally and on FTP. Data loss is impossible under normal operation.
+
+> **Important:** Schedule the weekly cleanup AFTER the daily run has had time to complete (e.g. daily at 03:00, weekly at 06:00 on Sunday).
+
+#### FTP Configuration
+
+Set these in `.env`:
+
+```ini
+FTP_HOST=plankton.obs-vlfr.fr
+FTP_USER=ftp_plankton
+FTP_PASSWORD=Pl@nkt0n4Ecotaxa
+FTP_REMOTE_DIR=
+```
 
 #### Recommended settings (in task Properties)
 

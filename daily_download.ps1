@@ -104,12 +104,18 @@ public class ConPtySession : IDisposable
     IntPtr _hPC, _inputWriteHandle, _outputReadHandle, _hProcess, _hThread, _attrList;
     public int ProcessId { get; private set; }
     public StringBuilder OutputBuffer { get; private set; }
+    readonly object _bufferLock = new object();
     Thread _readerThread;
     volatile bool _stopReading;
     string _outputLogPath;
     bool _disposed;
 
     public ConPtySession() { OutputBuffer = new StringBuilder(); }
+
+    public string GetOutput()
+    {
+        lock (_bufferLock) { return OutputBuffer.ToString(); }
+    }
 
     public void Start(string application, string commandLine, string workingDirectory, string outputLogPath)
     {
@@ -172,7 +178,7 @@ public class ConPtySession : IDisposable
             if (!ok || read == 0) break;
 
             string chunk = Encoding.UTF8.GetString(buf, 0, (int)read);
-            OutputBuffer.Append(chunk);
+            lock (_bufferLock) { OutputBuffer.Append(chunk); }
 
             if (_outputLogPath != null)
             {
@@ -301,7 +307,7 @@ function Wait-ForMarker {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
-        if ($Session.OutputBuffer.ToString() -match $MarkerRegex) {
+        if ($Session.GetOutput() -match $MarkerRegex) {
             return $true
         }
 
@@ -447,7 +453,7 @@ function Invoke-OctOSSession {
 
         Start-Sleep -Milliseconds 400
 
-        $stdout = $session.OutputBuffer.ToString()
+        $stdout = $session.GetOutput()
         Write-Log "Full OctOS output saved to: $($script:OctosOutputLog)"
         Write-Log "OctOS finished (exit code: $($session.ExitCode))"
 
@@ -529,7 +535,16 @@ $sddumpCommand = if ($TEST_TREE_FILE) {
     "sddump $TEST_TREE_FILE"
 } else {
     # For quick tests you can set TEST_TREE_FILE in .env.
-    "sddump tree_for_test.txt"
+    "sddump tree.txt"
+}
+
+# Rename existing tree file before sdlist creates a new one.
+$treeFile = Join-Path $OCTOS_DIR "filemanager\tree.txt"
+$prevTreeFile = Join-Path $OCTOS_DIR "filemanager\previous_tree.txt"
+if (Test-Path $treeFile) {
+    if (Test-Path $prevTreeFile) { Remove-Item $prevTreeFile -Force }
+    Rename-Item -Path $treeFile -NewName "previous_tree.txt"
+    Write-Log "Renamed tree.txt -> previous_tree.txt"
 }
 
 $steps = @(
@@ -554,6 +569,46 @@ $run = Invoke-OctOSSession `
 
 if ($run.Success) {
     Write-Log "All steps completed successfully."
+
+    # ---- Copy only new files to Desktop\data ----
+    $filemanagerDir = Join-Path $OCTOS_DIR "filemanager"
+    $destDir = Join-Path ([Environment]::GetFolderPath("Desktop")) "data"
+
+    $newTree = Get-Content $treeFile -ErrorAction SilentlyContinue
+    $oldTree = Get-Content $prevTreeFile -ErrorAction SilentlyContinue
+
+    if ($newTree) {
+        if ($oldTree) {
+            $oldSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$oldTree, [StringComparer]::OrdinalIgnoreCase)
+            $newFiles = $newTree | Where-Object { -not $oldSet.Contains($_) }
+        } else {
+            $newFiles = $newTree
+        }
+
+        if ($newFiles) {
+            $copyCount = 0
+            foreach ($relPath in $newFiles) {
+                $relPath = $relPath.Trim()
+                if (-not $relPath) { continue }
+                $src = Join-Path $filemanagerDir $relPath
+                $dst = Join-Path $destDir $relPath
+                if (Test-Path $src) {
+                    $dstFolder = Split-Path $dst -Parent
+                    if (-not (Test-Path $dstFolder)) {
+                        New-Item -ItemType Directory -Path $dstFolder -Force | Out-Null
+                    }
+                    Copy-Item -Path $src -Destination $dst -Force
+                    $copyCount++
+                }
+            }
+            Write-Log "Copied $copyCount new file(s) to $destDir"
+        } else {
+            Write-Log "No new files to copy."
+        }
+    } else {
+        Write-Log "No tree.txt found, skipping file copy." "WARN"
+    }
+
     Write-Log "Log: $script:LogFile"
     Write-Log "================================================================="
     Write-Log "  UVP6 DAILY DOWNLOAD - End (OK)"

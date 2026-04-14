@@ -102,12 +102,18 @@ public class ConPtySession : IDisposable
     IntPtr _hPC, _inputWriteHandle, _outputReadHandle, _hProcess, _hThread, _attrList;
     public int ProcessId { get; private set; }
     public StringBuilder OutputBuffer { get; private set; }
+    readonly object _bufferLock = new object();
     Thread _readerThread;
     volatile bool _stopReading;
     string _outputLogPath;
     bool _disposed;
 
     public ConPtySession() { OutputBuffer = new StringBuilder(); }
+
+    public string GetOutput()
+    {
+        lock (_bufferLock) { return OutputBuffer.ToString(); }
+    }
 
     public void Start(string application, string commandLine, string workingDirectory, string outputLogPath)
     {
@@ -170,7 +176,7 @@ public class ConPtySession : IDisposable
             if (!ok || read == 0) break;
 
             string chunk = Encoding.UTF8.GetString(buf, 0, (int)read);
-            OutputBuffer.Append(chunk);
+            lock (_bufferLock) { OutputBuffer.Append(chunk); }
 
             if (_outputLogPath != null)
             {
@@ -289,7 +295,7 @@ function Wait-ForMarker {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
-        $clean = Strip-Ansi $Session.OutputBuffer.ToString()
+        $clean = Strip-Ansi $Session.GetOutput()
         if ($clean -match $MarkerRegex) {
             return $true
         }
@@ -313,7 +319,7 @@ function Wait-ForMarkerCapture {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
-        $clean = Strip-Ansi $Session.OutputBuffer.ToString()
+        $clean = Strip-Ansi $Session.GetOutput()
         if ($clean -match $MarkerRegex) {
             return $Matches
         }
