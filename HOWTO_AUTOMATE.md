@@ -22,11 +22,15 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 
 ### Weekly workflow (automatic, safety-first)
 
-1. **sdlist** — get fresh file listing from SD card
+1. **Stop** UVP6 acquisition, then **sdlist** + **sddump** — verify SD listing and dump tree
 2. **Verify LOCAL** — check every file in tree.txt exists in filemanager/
 3. **Verify FTP** — check every file in tree.txt exists on the FTP server
-4. **ONLY if 100% verified** → **sdformat** to clean the SD card
-5. If ANY file is missing → **ABORT** (no format, no data loss)
+4. **ONLY if 100% verified** → **Stop** UVP6, then **sdformat** to clean the SD card
+5. **Reboot** UVP6 to resume acquisition
+6. If ANY file is missing → **ABORT** (no format, no data loss)
+7. A **timing dashboard** (`weekly_cleanup_dashboard_*.html`) is generated at the end of every run, and a one-line summary is appended to `weekly_cleanup_history.json` for cross-run comparison.
+
+> **UVP6 scheduled acquisition mode:** If the UVP6 is configured in scheduled mode (acquires at :00 and :30 each hour), a `reboot` command must only be sent while the instrument is idle. The scripts automatically send `$stop;` three times and wait for `$stopack;` before every reboot. After reboot, the script accepts `HW_CONF` (sent on every boot) as the reboot confirmation signal rather than waiting for `$startack;` (which only arrives at the next acquisition window).
 
 ---
 
@@ -34,7 +38,7 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 
 | File                 | Purpose                                                 |
 | -------------------- | ------------------------------------------------------- |
-| `.env`               | Configuration (COM port, IPs, timeouts, email settings)  |
+| `.env`               | Configuration (COM port, IPs, timeouts)                  |
 | `daily_download.ps1` | Main PowerShell script — download logic                  |
 | `daily_download.bat` | Launcher for Task Scheduler or double-click (download)   |
 | `daily_ftp_upload.ps1` | FTP upload of new files to remote server                |
@@ -48,12 +52,15 @@ This automation suite connects to a UVP6 underwater camera via **OctOS**, downlo
 
 Generated at runtime (inside `OCTOS_DIR`):
 
-| File                                | Purpose                                       |
-| ----------------------------------- | --------------------------------------------- |
-| `logs/download_YYYYMMDD_HHmmss.log` | Detailed log for each run                     |
-| `logs/download_history.csv`         | One-row-per-day history (open in Excel)       |
-| `logs/dashboard.html`               | Visual monitoring dashboard (open in browser) |
-| `status.txt`                        | Quick-glance status of the last run           |
+| File                                                  | Purpose                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------ |
+| `logs/download_YYYYMMDD_HHmmss.log`                   | Detailed log for each daily run                              |
+| `logs/weekly_cleanup_YYYYMMDD_HHmmss.log`             | Detailed log for each weekly run                             |
+| `logs/download_history.csv`                           | One-row-per-day download history (open in Excel)             |
+| `logs/weekly_cleanup_dashboard_YYYYMMDD_HHmmss.html`  | Per-run timing dashboard (open in browser)                   |
+| `logs/weekly_cleanup_dashboard_YYYYMMDD_HHmmss.json`  | Per-run timing data (raw JSON)                               |
+| `logs/weekly_cleanup_history.json`                    | Accumulated summary of all past weekly runs                  |
+| `status.txt`                                          | Quick-glance status of the last run                          |
 
 ---
 
@@ -87,6 +94,14 @@ BAUDRATE=115200
 
 # Absolute path to the OctOS root folder
 OCTOS_DIR=C:\OctOS_2024_00
+
+# Retry logic — number of attempts and delay (seconds) between retries
+MAX_RETRIES=3
+RETRY_DELAY=10
+
+# Set to true to write octos_output_*.log files (verbose, slow on large sessions)
+# Set to false (recommended) to skip them and rely on the per-run log instead
+OCTOS_OUTPUT_LOG=false
 ```
 
 > **Tip:** To find the COM port number, open Device Manager → Ports (COM & LPT).
@@ -140,16 +155,23 @@ This script **refuses to format** unless every file on the SD card has been conf
 
 > **Important:** Schedule the weekly cleanup AFTER the daily run has had time to complete (e.g. daily at 03:00, weekly at 06:00 on Sunday).
 
-#### FTP Configuration
+#### SFTP Configuration
 
 Set these in `.env`:
 
 ```ini
-FTP_HOST=plankton.obs-vlfr.fr
-FTP_USER=ftp_plankton
-FTP_PASSWORD=Pl@nkt0n4Ecotaxa
-FTP_REMOTE_DIR=
+SFTP_HOST=data.obsea.es
+SFTP_USER=uvp6
+SFTP_PORT=22
+SFTP_PASSWORD=secret
+SFTP_REMOTE_DIR=uvp6/data
 ```
+
+> **Requirement:** The **Posh-SSH** PowerShell module must be installed once on the PC:
+> ```powershell
+> Install-Module -Name Posh-SSH -Scope CurrentUser
+> ```
+> After that, the scripts load it automatically at runtime with no further setup.
 
 #### Recommended settings (in task Properties)
 
@@ -182,42 +204,30 @@ A CSV file with one row per run. Open in Excel or any spreadsheet. Columns:
 | Date | Time | Status | SD_Files | New | Downloaded | Failed | New_Acquisitions | Error | Log |
 | ---- | ---- | ------ | -------- | --- | ---------- | ------ | ---------------- | ----- | --- |
 
-### Dashboard: `logs/dashboard.html`
+### Weekly cleanup dashboard: `logs/weekly_cleanup_dashboard_*.html`
 
-Open in any web browser. Features:
-- **Summary cards** — files downloaded, acquisitions, failures (last 7 days)
-- **Full history table** — color-coded rows (green/orange/red)
-- **Auto-refresh** every 5 minutes (if kept open)
+A new HTML file is generated after every weekly run. Open in any web browser.
 
-### Email notifications (optional)
+**Current run panel** — one row per action (sdlist, sddump, FTP check, sdformat, reboot, …) with:
+- Start time, end time, duration (HHhMMmSSs format)
+- Status (OK / WARN / ERROR) — colour-coded green/amber/red
+- Details (file counts, error messages)
 
-Configure in `.env`:
-
-```ini
-SMTP_SERVER=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=user@example.com
-SMTP_PASSWORD=secret
-EMAIL_FROM=uvp6@example.com
-EMAIL_TO=team@example.com
-
-# true = email only on errors; false = email every run
-EMAIL_ONLY_ON_ERROR=true
-```
-
-Leave `SMTP_SERVER` empty to disable email notifications entirely.
+**Past runs panel** — loaded from `weekly_cleanup_history.json`, shows every previous run with its total duration, file count, and final status. Useful for spotting regressions or slow runs over time.
 
 ---
 
 ## Troubleshooting
 
-| Symptom                                          | Likely cause                                  | Fix                                                |
-| ------------------------------------------------ | --------------------------------------------- | -------------------------------------------------- |
-| Script fails immediately                         | `OCTOS_DIR` is wrong in `.env`                | Fix the path to your OctOS installation            |
-| `tree.txt` not updated                           | `sdlist` command failed or timed out          | Increase `SDLIST_TIMEOUT`, check serial connection |
-| No files downloaded but there should be new data | `sddump` timeout too short                    | Increase `SDDUMP_TIMEOUT`                          |
-| OctOS doesn't respond to commands                | OctOS may use Console API instead of stdin    | See "Alternative approach" section below           |
-| Email not sent                                   | SMTP settings incorrect or server unreachable | Test SMTP settings independently                   |
+| Symptom                                          | Likely cause                                                         | Fix                                                                       |
+| ------------------------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Script fails immediately                         | `OCTOS_DIR` is wrong in `.env`                                       | Fix the path to your OctOS installation                                   |
+| `tree.txt` not updated                           | `sdlist` command failed or timed out                                 | Increase `SDLIST_TIMEOUT`, check serial connection                        |
+| `sdlist` fails with socket error 10049           | Transient UDP socket not ready on the UVP6 Ethernet interface        | Scripts retry automatically (`MAX_RETRIES` times); usually resolves itself |
+| No files downloaded but there should be new data | `sddump` timeout too short                                           | Increase `SDDUMP_TIMEOUT`                                                 |
+| `(SUmode) Unable to put UVP6 into SU mode`       | `reboot` sent while UVP6 is actively acquiring (scheduled mode)      | Scripts now send `$stop;` ×3 before every reboot and wait for `$stopack;` |
+| Script hangs after reboot (timeout on `$startack;`) | UVP6 in scheduled mode — `$startack;` only arrives at next :00/:30 window | Scripts accept `HW_CONF` (sent on every boot) as the reboot signal  |
+| OctOS doesn't respond to commands                | OctOS may use Console API instead of stdin                           | See "Alternative approach" section below                                  |
 
 ### Alternative approach: if OctOS doesn't accept stdin
 
@@ -231,6 +241,3 @@ A commented-out Python/pyserial example is included at the bottom of `daily_down
 
 ---
 
-## Log retention
-
-Old log files are automatically deleted after **90 days** (configurable via `LOG_RETENTION_DAYS` in `.env`). The CSV history and dashboard are never pruned — only individual `.log` files are rotated.

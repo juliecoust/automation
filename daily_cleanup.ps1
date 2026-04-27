@@ -24,9 +24,12 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 public class ConPtySession : IDisposable
 {
+    static readonly Regex AnsiRegex = new Regex(@"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[^\[\]][a-zA-Z]", RegexOptions.Compiled);
+    static string StripAnsi(string s) { return AnsiRegex.Replace(s, ""); }
     // ---- P/Invoke declarations ----
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -185,7 +188,7 @@ public class ConPtySession : IDisposable
                 string[] lines = chunk.Split(new[] { '\n' }, StringSplitOptions.None);
                 foreach (string ln in lines)
                 {
-                    string clean = ln.TrimEnd('\r');
+                    string clean = StripAnsi(ln.TrimEnd('\r'));
                     if (clean.Length > 0)
                     {
                         try { File.AppendAllText(_outputLogPath, "[" + ts + "] [STDOUT] " + clean + Environment.NewLine, Encoding.UTF8); }
@@ -348,6 +351,7 @@ $HOST_IP = $cfg["HOST_IP"]
 $BAUDRATE = $cfg["BAUDRATE"]
 $WAIT_SECS = if ($cfg["WAIT_BETWEEN_COMMANDS"]) { [int]$cfg["WAIT_BETWEEN_COMMANDS"] } else { 3 }
 $SDFORMAT_TMO = if ($cfg["SDFORMAT_TIMEOUT"]) { [int]$cfg["SDFORMAT_TIMEOUT"] } else { 3600 }
+$OCTOS_LOG_EN = $cfg["OCTOS_OUTPUT_LOG"] -eq 'true'
 
 $octosExe = Join-Path $OCTOS_DIR "bin\OctOS.exe"
 if (-not (Test-Path $octosExe)) {
@@ -374,8 +378,8 @@ $success = $false
 
 try {
     # Dedicated log file for raw OctOS output.
-    $script:OctosOutputLog = Join-Path $logDir ("octos_output_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
-    Write-Log "OctOS output log: $($script:OctosOutputLog)"
+    $script:OctosOutputLog = if ($OCTOS_LOG_EN) { Join-Path $logDir ("octos_output_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log") } else { $null }
+    if ($script:OctosOutputLog) { Write-Log "OctOS output log: $($script:OctosOutputLog)" }
 
     $commandLine = "`"$octosExe`" $octosArgs"
     $session = New-Object ConPtySession
@@ -399,20 +403,30 @@ try {
     Write-Log "  .. Waiting ${DATA_WAIT}s for data lines (LPM_DATA/BLACK_DATA)..."
     $hasData = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec $DATA_WAIT
     if (-not $hasData) {
-        Write-Log "  <- No data lines received. Sending reboot to wake UVP6..." "WARN"
+        Write-Log "  <- No data lines received. Stopping then rebooting..." "WARN"
+        $session.WriteLine('$stop;')
+        Start-Sleep -Seconds 2
+        $session.WriteLine('$stop;')
+        Start-Sleep -Seconds 2
+        $session.WriteLine('$stop;')
+        $stopOk = Wait-ForMarker -Session $session -MarkerRegex '\$stopack;' -TimeoutSec 30
+        if ($stopOk) { Write-Log "  <- Received `$stopack;" }
+        else         { Write-Log "  <- No `$stopack; (UVP6 may already be idle)" "WARN" }
+        Start-Sleep -Seconds 2
         $session.WriteLine("reboot")
         Write-Log "  -> Sent: reboot"
-        Write-Log "  .. Waiting for `$startack;..."
-        $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
-        if (-not $ok) { throw "Timeout waiting for `$startack; after pre-reboot." }
-        Write-Log "  <- Received `$startack;"
+        Write-Log "  .. Waiting for reboot confirmation..."
+        $ok = Wait-ForMarker -Session $session -MarkerRegex '(\$startack;|HW_CONF,)' -TimeoutSec 180
+        if (-not $ok) { throw "Timeout waiting for reboot confirmation (no `$startack; or HW_CONF)." }
+        Write-Log "  <- Reboot confirmed."
 
         Write-Log "  .. Waiting for data lines after reboot..."
         $hasData2 = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec 60
         if (-not $hasData2) {
-            throw "UVP6 still not sending data after reboot."
+            Write-Log "  <- No data after reboot (UVP6 may be in scheduled mode, waiting for next window)." "WARN"
+        } else {
+            Write-Log "  <- Data lines confirmed after reboot."
         }
-        Write-Log "  <- Data lines confirmed after reboot."
     } else {
         Write-Log "  <- Data lines detected, UVP6 is active."
     }
@@ -463,10 +477,10 @@ try {
     Start-Sleep -Seconds $WAIT_SECS
     $session.WriteLine("reboot")
     Write-Log "  -> Sent: reboot"
-    Write-Log "  .. Waiting for `$startack;..."
-    $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
-    if (-not $ok) { throw "Timeout waiting for `$startack; after reboot." }
-    Write-Log "  <- Received `$startack;"
+    Write-Log "  .. Waiting for reboot confirmation..."
+    $ok = Wait-ForMarker -Session $session -MarkerRegex '(\$startack;|HW_CONF,)' -TimeoutSec 180
+    if (-not $ok) { throw "Timeout waiting for reboot confirmation (no `$startack; or HW_CONF)." }
+    Write-Log "  <- Reboot confirmed."
 
     # ---- Step 6: quit ----
     Start-Sleep -Seconds $WAIT_SECS
@@ -493,14 +507,24 @@ catch {
     # ---- Safety reboot: ensure UVP6 resumes acquisition even on error ----
     if ($session -and -not $session.HasExited) {
         try {
+            Write-Log "  -> Sending stop before safety reboot..."
+            $session.WriteLine('$stop;')
+            Start-Sleep -Seconds 2
+            $session.WriteLine('$stop;')
+            Start-Sleep -Seconds 2
+            $session.WriteLine('$stop;')
+            $stopOk = Wait-ForMarker -Session $session -MarkerRegex '\$stopack;' -TimeoutSec 30
+            if ($stopOk) { Write-Log "  <- Received `$stopack;" }
+            else         { Write-Log "  <- No `$stopack; (may already be stopped)" "WARN" }
+            Start-Sleep -Seconds 2
             Write-Log "  -> Sending safety reboot to resume UVP6 acquisition..."
             $session.WriteLine("reboot")
             Write-Log "  -> Sent: reboot"
-            $ok = Wait-ForMarker -Session $session -MarkerRegex '\$startack;' -TimeoutSec 180
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '(\$startack;|HW_CONF,)' -TimeoutSec 180
             if ($ok) {
-                Write-Log "  <- Safety reboot successful (`$startack; received)."
+                Write-Log "  <- Safety reboot successful."
             } else {
-                Write-Log "  <- Safety reboot: no `$startack; within 180s." "WARN"
+                Write-Log "  <- Safety reboot: no confirmation within 180s." "WARN"
             }
         }
         catch {
