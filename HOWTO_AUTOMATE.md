@@ -126,7 +126,14 @@ Watch the console output. After completion, check:
 
 ### 3. Schedule with Task Scheduler
 
-You need **two** scheduled tasks:
+The automation requires ** two scheduled tasks** in Windows Task Scheduler. They are independent scripts but must be scheduled so the weekly cleanup always runs after the daily run has finished.
+
+| Task | Script | Recommended trigger |
+|------|--------|-------------------|
+| **Task 1 — Daily Download + Upload** | `daily_run.bat` | Every day at 03:00 |
+| **Task 2 — Weekly Verify & Cleanup** | `weekly_cleanup.bat` | Every Sunday at 06:00 |
+
+> **Why two tasks?** The daily task keeps data flowing every day (download + FTP upload). The weekly task does the heavier verification and SD card format — it depends on the daily task having run first so that all files are already present locally and on FTP before it checks.
 
 #### Task 1: Daily Download + FTP Upload
 
@@ -153,7 +160,7 @@ This runs the download first, then automatically uploads new files to FTP.
 
 This script **refuses to format** unless every file on the SD card has been confirmed present both locally and on FTP. Data loss is impossible under normal operation.
 
-> **Important:** Schedule the weekly cleanup AFTER the daily run has had time to complete (e.g. daily at 03:00, weekly at 06:00 on Sunday).
+> **Important:** Schedule the weekly cleanup AFTER the daily run has had time to complete (e.g. daily at 03:00, weekly at 06:00 on Sunday). On the day the weekly cleanup runs, the daily task will have already downloaded and uploaded everything — the weekly task then verifies and formats.
 
 #### SFTP Configuration
 
