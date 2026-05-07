@@ -839,8 +839,7 @@ for ($attempt = 1; $attempt -le $MAX_RETRIES; $attempt++) {
         $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $SDLIST_TMO
         if (-not $ok) { throw "Timeout waiting for sdlist to complete." }
         # [SDLIST]: EXIT appears on both success AND error — check for the error case explicitly.
-        $sdlistOut = Strip-Ansi $session.GetOutput()
-        if ($sdlistOut -match 'Command sdlist returned an error') {
+        if ($session.GetOutput() -match 'Command sdlist returned an error') {
             throw "sdlist exited with error (tree.txt transfer failed or other sdlist error)."
         }
         Write-Log "  <- sdlist completed."
@@ -855,8 +854,7 @@ for ($attempt = 1; $attempt -le $MAX_RETRIES; $attempt++) {
         $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SDDUMP_TMO
         if (-not $ok) { throw "Timeout waiting for sddump to complete." }
         # [SDDUMP]: EXIT appears on both success AND error — check for the error case explicitly.
-        $sddumpOut = Strip-Ansi $session.GetOutput()
-        if ($sddumpOut -match 'Command sddump returned an error') {
+        if ($session.GetOutput() -match 'Command sddump returned an error') {
             throw "sddump exited with error."
         }
         Write-Log "  <- sddump completed."
