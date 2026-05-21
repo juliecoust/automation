@@ -403,29 +403,32 @@ try {
     Write-Log "  .. Waiting ${DATA_WAIT}s for data lines (LPM_DATA/BLACK_DATA)..."
     $hasData = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec $DATA_WAIT
     if (-not $hasData) {
-        Write-Log "  <- No data lines received. Stopping then rebooting..." "WARN"
+        Write-Log "  <- No data lines received. Sending stop..." "WARN"
         $session.WriteLine('$stop;')
         Start-Sleep -Seconds 2
         $session.WriteLine('$stop;')
         Start-Sleep -Seconds 2
         $session.WriteLine('$stop;')
         $stopOk = Wait-ForMarker -Session $session -MarkerRegex '\$stopack;' -TimeoutSec 30
-        if ($stopOk) { Write-Log "  <- Received `$stopack;" }
-        else         { Write-Log "  <- No `$stopack; (UVP6 may already be idle)" "WARN" }
-        Start-Sleep -Seconds 2
-        $session.WriteLine("reboot")
-        Write-Log "  -> Sent: reboot"
-        Write-Log "  .. Waiting for reboot confirmation..."
-        $ok = Wait-ForMarker -Session $session -MarkerRegex '(\$startack;|HW_CONF,)' -TimeoutSec 180
-        if (-not $ok) { throw "Timeout waiting for reboot confirmation (no `$startack; or HW_CONF)." }
-        Write-Log "  <- Reboot confirmed."
-
-        Write-Log "  .. Waiting for data lines after reboot..."
-        $hasData2 = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec 60
-        if (-not $hasData2) {
-            Write-Log "  <- No data after reboot (UVP6 may be in scheduled mode, waiting for next window)." "WARN"
+        if ($stopOk) {
+            Write-Log "  <- Received `$stopack; — UVP6 stopped cleanly, no reboot needed."
         } else {
-            Write-Log "  <- Data lines confirmed after reboot."
+            Write-Log "  <- No `$stopack; — rebooting to recover..." "WARN"
+            Start-Sleep -Seconds 2
+            $session.WriteLine("reboot")
+            Write-Log "  -> Sent: reboot"
+            Write-Log "  .. Waiting for reboot confirmation..."
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '(\$startack;|HW_CONF,)' -TimeoutSec 180
+            if (-not $ok) { throw "Timeout waiting for reboot confirmation (no `$startack; or HW_CONF)." }
+            Write-Log "  <- Reboot confirmed."
+
+            Write-Log "  .. Waiting for data lines after reboot..."
+            $hasData2 = Wait-ForMarker -Session $session -MarkerRegex '(LPM_DATA|BLACK_DATA),' -TimeoutSec 60
+            if (-not $hasData2) {
+                Write-Log "  <- No data after reboot (UVP6 may be in scheduled mode, waiting for next window)." "WARN"
+            } else {
+                Write-Log "  <- Data lines confirmed after reboot."
+            }
         }
     } else {
         Write-Log "  <- Data lines detected, UVP6 is active."
