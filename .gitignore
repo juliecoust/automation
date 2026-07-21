@@ -1,0 +1,6 @@
+# Credentials / machine-specific configuration - never commit
+.env
+
+# Runtime artifacts
+*.lock
+*.log

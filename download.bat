@@ -1,18 +1,18 @@
 @ECHO off
 REM ============================================================
-REM  Launcher for daily_cleanup.ps1
+REM  Launcher for download.ps1 (UVP6 download only, no upload)
 REM  Use with Windows Task Scheduler or run by double-clicking
 REM ============================================================
 
 cd /d "%~dp0"
 
-powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0daily_cleanup.ps1"
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%~dp0download.ps1"
+SET RC=%ERRORLEVEL%
 
-IF %ERRORLEVEL% NEQ 0 (
+IF %RC% NEQ 0 (
     ECHO.
-    ECHO [ERROR] The script returned code %ERRORLEVEL%
+    ECHO [ERROR] The script returned code %RC%
     ECHO Check the logs in the logs\ folder
 )
 
-REM Uncomment the following line to keep the window open (debug)
-REM PAUSE
+EXIT /B %RC%
