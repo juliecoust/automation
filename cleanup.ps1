@@ -286,8 +286,10 @@ $cfg = Load-EnvFile -Path $envFile
 
 $OCTOS_DIR    = $cfg["OCTOS_DIR"]
 $COM_PORT     = $cfg["COM_PORT"]
+$UVP_IP       = $cfg["UVP_IP"]
 $HOST_IP      = $cfg["HOST_IP"]
 $BAUDRATE     = $cfg["BAUDRATE"]
+$OCTOS_PORT   = $cfg["OCTOS_PORT"]
 $WAIT_SECS    = if ($cfg["WAIT_BETWEEN_COMMANDS"]) { [int]$cfg["WAIT_BETWEEN_COMMANDS"] } else { 3 }
 $SDLIST_TMO   = if ($cfg["SDLIST_TIMEOUT"])  { [int]$cfg["SDLIST_TIMEOUT"] }  else { 600 }
 $SDDUMP_TMO   = if ($cfg["SDDUMP_TIMEOUT"])  { [int]$cfg["SDDUMP_TIMEOUT"] }  else { 14400 }
@@ -327,8 +329,12 @@ try {
     Initialize-Dashboard -LogDirectory $logDir
     Write-Log "Dashboard will be generated at: $script:DashboardHtmlFile"
 
+    # OctOS.exe launch args, positional order: COM UVP_IP HOST_IP BAUDRATE PORT
     $octosArgs = "$COM_PORT"
-    if ($BAUDRATE) { $octosArgs += " $BAUDRATE" }
+    if ($UVP_IP)     { $octosArgs += " $UVP_IP" }
+    if ($HOST_IP)    { $octosArgs += " $HOST_IP" }
+    if ($BAUDRATE)   { $octosArgs += " $BAUDRATE" }
+    if ($OCTOS_PORT) { $octosArgs += " $OCTOS_PORT" }
 
     $filemanagerDir = Join-Path $OCTOS_DIR "filemanager"
     $treeFile = Join-Path $filemanagerDir "tree.txt"

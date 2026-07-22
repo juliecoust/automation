@@ -33,8 +33,10 @@ $cfg       = Load-EnvFile -Path $envFile
 
 $OCTOS_DIR    = $cfg["OCTOS_DIR"]
 $COM_PORT     = $cfg["COM_PORT"]
+$UVP_IP       = $cfg["UVP_IP"]
 $HOST_IP      = $cfg["HOST_IP"]
 $BAUDRATE     = $cfg["BAUDRATE"]
+$OCTOS_PORT   = $cfg["OCTOS_PORT"]
 $WAIT_SECS    = if ($cfg["WAIT_BETWEEN_COMMANDS"]) { [int]$cfg["WAIT_BETWEEN_COMMANDS"] } else { 3 }
 $SDLIST_TMO   = if ($cfg["SDLIST_TIMEOUT"])  { [int]$cfg["SDLIST_TIMEOUT"] }  else { 600 }
 $SDDUMP_TMO   = if ($cfg["SDDUMP_TIMEOUT"])  { [int]$cfg["SDDUMP_TIMEOUT"] }  else { 3600 }
@@ -64,8 +66,12 @@ if (-not (Enter-ScriptLock -LockFile $lockFile)) {
 }
 
 try {
+    # OctOS.exe launch args, positional order: COM UVP_IP HOST_IP BAUDRATE PORT
     $octosArgs = "$COM_PORT"
-    if ($BAUDRATE) { $octosArgs += " $BAUDRATE" }
+    if ($UVP_IP)     { $octosArgs += " $UVP_IP" }
+    if ($HOST_IP)    { $octosArgs += " $HOST_IP" }
+    if ($BAUDRATE)   { $octosArgs += " $BAUDRATE" }
+    if ($OCTOS_PORT) { $octosArgs += " $OCTOS_PORT" }
 
     # Rotate tree files before sdlist writes a new one.
     # previous_tree.txt is the baseline sftp_upload.ps1 diffs against.
