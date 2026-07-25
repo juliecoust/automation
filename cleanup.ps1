@@ -297,6 +297,7 @@ $SDFORMAT_TMO = if ($cfg["SDFORMAT_TIMEOUT"]){ [int]$cfg["SDFORMAT_TIMEOUT"]} el
 $DATA_WAIT    = if ($cfg["DATA_WAIT_TIMEOUT"]){ [int]$cfg["DATA_WAIT_TIMEOUT"]} else { 15 }
 $MAX_RETRIES  = if ($cfg["MAX_RETRIES"])      { [int]$cfg["MAX_RETRIES"] }      else { 3 }
 $RETRY_DELAY  = if ($cfg["RETRY_DELAY"])      { [int]$cfg["RETRY_DELAY"] }      else { 10 }
+$SDDUMP_SESSION_RETRIES = if ($cfg["SDDUMP_SESSION_RETRIES"]) { [int]$cfg["SDDUMP_SESSION_RETRIES"] } else { 5 }
 $OCTOS_LOG_EN = $cfg["OCTOS_OUTPUT_LOG"] -eq 'true'
 $SFTP_HOST    = $cfg["SFTP_HOST"]
 $SFTP_USER    = $cfg["SFTP_USER"]
@@ -400,6 +401,7 @@ try {
                 -OctOSExe $octosExe -WorkDir $OCTOS_DIR -Arguments $octosArgs -OutputLogPath $octosLog `
                 -HostIp $HOST_IP -WaitSecs $WAIT_SECS -DataWaitTimeoutSec $DATA_WAIT `
                 -SdlistTimeoutSec $SDLIST_TMO -SddumpTimeoutSec $SDDUMP_TMO `
+                -SddumpInSessionRetries $SDDUMP_SESSION_RETRIES `
                 -OnStep $onStep -FailureLabel "PHASE 1 attempt $attempt"
 
             if ($result.Success) {

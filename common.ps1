@@ -612,6 +612,7 @@ function Invoke-OctOSDownloadAttempt {
         [int]$DataWaitTimeoutSec,
         [int]$SdlistTimeoutSec,
         [int]$SddumpTimeoutSec,
+        [int]$SddumpInSessionRetries = 5,
         [switch]$RebootAfter,
         [scriptblock]$OnStep,
         [string]$FailureLabel = "Download attempt"
@@ -645,17 +646,33 @@ function Invoke-OctOSDownloadAttempt {
         if ($OnStep) { & $OnStep 'sdlist' 'ok' }
 
         # sddump - download files not yet on disk.
+        # Retries within the same OctOS session: when sddump reports failures,
+        # re-running it immediately picks up only the remaining files, avoiding
+        # the overhead of a full stop/sdlist/reboot cycle for each retry.
         Start-Sleep -Seconds $WaitSecs
         if ($OnStep) { & $OnStep 'sddump' 'start' }
-        $mark = $session.GetOutputLength()
-        $session.WriteLine("sddump tree.txt")
-        Write-Log "  -> Sent: sddump tree.txt"
-        Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${SddumpTimeoutSec}s)..."
-        $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SddumpTimeoutSec -FromOffset $mark
-        if (-not $ok) { throw "Timeout waiting for sddump to complete." }
-        # [SDDUMP]: EXIT appears on both success AND error - check the error case explicitly.
-        if ($session.GetOutputFrom($mark) -match 'Command sddump returned an error') {
-            throw "sddump exited with error."
+        $sddumpOk = $false
+        $sddumpTotalAttempts = $SddumpInSessionRetries + 1
+        for ($sddumpTry = 1; $sddumpTry -le $sddumpTotalAttempts; $sddumpTry++) {
+            if ($sddumpTry -gt 1) {
+                Write-Log "  sddump had file failures - retrying within session ($sddumpTry/$sddumpTotalAttempts)..." "WARN"
+                Start-Sleep -Seconds $WaitSecs
+            }
+            $mark = $session.GetOutputLength()
+            $session.WriteLine("sddump tree.txt")
+            Write-Log "  -> Sent: sddump tree.txt"
+            Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${SddumpTimeoutSec}s)..."
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SddumpTimeoutSec -FromOffset $mark
+            if (-not $ok) { throw "Timeout waiting for sddump to complete." }
+            if ($session.GetOutputFrom($mark) -match 'Command sddump returned an error') {
+                Write-Log "  <- sddump exited with errors (some files failed)." "WARN"
+            } else {
+                $sddumpOk = $true
+                break
+            }
+        }
+        if (-not $sddumpOk) {
+            throw "sddump still has failures after $sddumpTotalAttempts in-session attempt(s)."
         }
         Write-Log "  <- sddump completed."
         if ($OnStep) { & $OnStep 'sddump' 'ok' }
