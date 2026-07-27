@@ -612,6 +612,7 @@ function Invoke-OctOSDownloadAttempt {
         [int]$DataWaitTimeoutSec,
         [int]$SdlistTimeoutSec,
         [int]$SddumpTimeoutSec,
+        [int]$SdlistInSessionRetries = 10,
         [int]$SddumpInSessionRetries = 5,
         [switch]$RebootAfter,
         [scriptblock]$OnStep,
@@ -630,17 +631,36 @@ function Invoke-OctOSDownloadAttempt {
         if ($OnStep) { & $OnStep 'stopped' 'ok' }
 
         # sdlist - build fresh SD card file listing.
+        # Retries within the same OctOS session WITHOUT rebooting: the tree.txt
+        # transfer is a lossy UDP download that frequently needs several attempts
+        # to complete (OctOS itself reports "file transmission was incomplete").
+        # Rebooting between tries would be wasteful and, in scheduled mode,
+        # disruptive - so we simply re-send sdlist on the same live session.
         Start-Sleep -Seconds $WaitSecs
         if ($OnStep) { & $OnStep 'sdlist' 'start' }
-        $mark = $session.GetOutputLength()
-        $session.WriteLine("sdlist $HostIp")
-        Write-Log "  -> Sent: sdlist $HostIp"
-        Write-Log "  .. Waiting for [SDLIST] EXIT (timeout ${SdlistTimeoutSec}s)..."
-        $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $SdlistTimeoutSec -FromOffset $mark
-        if (-not $ok) { throw "Timeout waiting for sdlist to complete." }
-        # [SDLIST]: EXIT appears on both success AND error - check the error case explicitly.
-        if ($session.GetOutputFrom($mark) -match 'Command sdlist returned an error') {
-            throw "sdlist exited with error (tree.txt transfer failed or other sdlist error)."
+        $sdlistOk = $false
+        $sdlistTotalAttempts = $SdlistInSessionRetries + 1
+        for ($sdlistTry = 1; $sdlistTry -le $sdlistTotalAttempts; $sdlistTry++) {
+            if ($sdlistTry -gt 1) {
+                Write-Log "  sdlist tree.txt transfer failed - retrying within session ($sdlistTry/$sdlistTotalAttempts)..." "WARN"
+                Start-Sleep -Seconds $WaitSecs
+            }
+            $mark = $session.GetOutputLength()
+            $session.WriteLine("sdlist $HostIp")
+            Write-Log "  -> Sent: sdlist $HostIp"
+            Write-Log "  .. Waiting for [SDLIST] EXIT (timeout ${SdlistTimeoutSec}s)..."
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $SdlistTimeoutSec -FromOffset $mark
+            if (-not $ok) { throw "Timeout waiting for sdlist to complete." }
+            # [SDLIST]: EXIT appears on both success AND error - check the error case explicitly.
+            if ($session.GetOutputFrom($mark) -match 'Command sdlist returned an error') {
+                Write-Log "  <- sdlist exited with error (tree.txt transfer incomplete)." "WARN"
+            } else {
+                $sdlistOk = $true
+                break
+            }
+        }
+        if (-not $sdlistOk) {
+            throw "sdlist still failing after $sdlistTotalAttempts in-session attempt(s)."
         }
         Write-Log "  <- sdlist completed."
         if ($OnStep) { & $OnStep 'sdlist' 'ok' }
