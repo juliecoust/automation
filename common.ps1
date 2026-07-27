@@ -613,6 +613,7 @@ function Invoke-OctOSDownloadAttempt {
         [int]$SdlistTimeoutSec,
         [int]$SddumpTimeoutSec,
         [int]$SdlistInSessionRetries = 10,
+        [int]$SdlistRetryDelaySec = 10,
         [int]$SddumpInSessionRetries = 5,
         [switch]$RebootAfter,
         [scriptblock]$OnStep,
@@ -642,8 +643,11 @@ function Invoke-OctOSDownloadAttempt {
         $sdlistTotalAttempts = $SdlistInSessionRetries + 1
         for ($sdlistTry = 1; $sdlistTry -le $sdlistTotalAttempts; $sdlistTry++) {
             if ($sdlistTry -gt 1) {
-                Write-Log "  sdlist tree.txt transfer failed - retrying within session ($sdlistTry/$sdlistTotalAttempts)..." "WARN"
-                Start-Sleep -Seconds $WaitSecs
+                Write-Log "  sdlist tree.txt transfer failed - retrying within session ($sdlistTry/$sdlistTotalAttempts) after ${SdlistRetryDelaySec}s..." "WARN"
+                # A longer pause than the usual inter-command delay: each sdlist
+                # re-powers the Processing Unit, and firing them too close can hit
+                # "PU is powered, but the READY signal wasn't set". Let the PU settle.
+                Start-Sleep -Seconds $SdlistRetryDelaySec
             }
             $mark = $session.GetOutputLength()
             $session.WriteLine("sdlist $HostIp")
