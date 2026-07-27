@@ -67,10 +67,12 @@ if (-not (Enter-ScriptLock -LockFile $lockFile)) {
 }
 
 try {
-    # OctOS.exe launch args, positional order: COM UVP_IP HOST_IP BAUDRATE PORT
+    # OctOS.exe launch args, positional order: COM HOST_IP UVP_IP BAUDRATE PORT
+    # (HOST_IP = this computer, UVP_IP = the instrument - confirmed by OctOS's
+    #  own "Host IP (this computer)=... / UVP6 IP=..." startup banner).
     $octosArgs = "$COM_PORT"
-    if ($UVP_IP)     { $octosArgs += " $UVP_IP" }
     if ($HOST_IP)    { $octosArgs += " $HOST_IP" }
+    if ($UVP_IP)     { $octosArgs += " $UVP_IP" }
     if ($BAUDRATE)   { $octosArgs += " $BAUDRATE" }
     if ($OCTOS_PORT) { $octosArgs += " $OCTOS_PORT" }
 
