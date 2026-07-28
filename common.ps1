@@ -610,6 +610,18 @@ function Count-TransferFailures {
         'file transmission was incomplete|transmission header not received')).Count
 }
 
+# Effective wait timeout for a command: never wait past the session download
+# budget, so a hung sdlist/sddump can never hold the instrument stopped beyond
+# MaxDownloadMinutes (the budget is otherwise only checked between retries).
+function Get-EffectiveTimeout {
+    param([int]$Configured, $Deadline)
+    if (-not $Deadline) { return $Configured }
+    $remain = [int][math]::Ceiling(($Deadline - (Get-Date)).TotalSeconds)
+    if ($remain -lt 5) { $remain = 5 }
+    if ($remain -lt $Configured) { return $remain }
+    return $Configured
+}
+
 # Counts data files currently in the local filemanager folder, ignoring the
 # tree.txt bookkeeping files. Used to measure download progress vs the SD card.
 function Get-FilemanagerFileCount {
@@ -684,9 +696,18 @@ function Invoke-OctOSDownloadAttempt {
             $mark = $session.GetOutputLength()
             $session.WriteLine("sdlist $HostIp")
             Write-Log "  -> Sent: sdlist $HostIp"
-            Write-Log "  .. Waiting for [SDLIST] EXIT (timeout ${SdlistTimeoutSec}s)..."
-            $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $SdlistTimeoutSec -FromOffset $mark
-            if (-not $ok) { throw "Timeout waiting for sdlist to complete." }
+            $sdlistWait = Get-EffectiveTimeout -Configured $SdlistTimeoutSec -Deadline $downloadDeadline
+            Write-Log "  .. Waiting for [SDLIST] EXIT (timeout ${sdlistWait}s)..."
+            $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $sdlistWait -FromOffset $mark
+            if (-not $ok) {
+                # A hung sdlist (no [SDLIST] EXIT at all) is retried within the
+                # session rather than aborting the whole attempt - far cheaper
+                # than a full stop/reboot/re-open cycle. The budget check at the
+                # top of the loop ends it if we have run out of time.
+                Write-Log "  <- sdlist produced no [SDLIST] EXIT within ${sdlistWait}s - retrying." "WARN"
+                $sdlistFailedTransfers++
+                continue
+            }
             $sdlistOut = $session.GetOutputFrom($mark)
             $sdlistFailedTransfers += (Count-TransferFailures $sdlistOut)
             # [SDLIST]: EXIT appears on both success AND error - check the error case explicitly.
@@ -735,9 +756,17 @@ function Invoke-OctOSDownloadAttempt {
                 $mark = $session.GetOutputLength()
                 $session.WriteLine("sddump tree.txt")
                 Write-Log "  -> Sent: sddump tree.txt"
-                Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${SddumpTimeoutSec}s)..."
-                $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SddumpTimeoutSec -FromOffset $mark
-                if (-not $ok) { throw "Timeout waiting for sddump to complete." }
+                $sddumpWait = Get-EffectiveTimeout -Configured $SddumpTimeoutSec -Deadline $downloadDeadline
+                Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${sddumpWait}s)..."
+                $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $sddumpWait -FromOffset $mark
+                if (-not $ok) {
+                    # No [SDDUMP] EXIT within the (budget-capped) timeout: keep
+                    # the files already downloaded and retry in-session; the
+                    # budget check at the top of the loop ends it if out of time.
+                    Write-Log "  <- sddump produced no [SDDUMP] EXIT within ${sddumpWait}s - retrying (partial progress kept)." "WARN"
+                    $sddumpFailedTransfers++
+                    continue
+                }
                 $sddumpOut = $session.GetOutputFrom($mark)
                 $sddumpFailedTransfers += (Count-TransferFailures $sddumpOut)
                 if ($sddumpOut -match 'Command sddump returned an error') {
