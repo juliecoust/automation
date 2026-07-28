@@ -299,6 +299,7 @@ $MAX_RETRIES  = if ($cfg["MAX_RETRIES"])      { [int]$cfg["MAX_RETRIES"] }      
 $RETRY_DELAY  = if ($cfg["RETRY_DELAY"])      { [int]$cfg["RETRY_DELAY"] }      else { 10 }
 $SDLIST_SESSION_RETRIES = if ($cfg["SDLIST_SESSION_RETRIES"]) { [int]$cfg["SDLIST_SESSION_RETRIES"] } else { 10 }
 $SDLIST_RETRY_DELAY     = if ($cfg["SDLIST_RETRY_DELAY"]) { [int]$cfg["SDLIST_RETRY_DELAY"] } else { 10 }
+$MAX_DOWNLOAD_MINUTES   = if ($cfg["MAX_DOWNLOAD_MINUTES"]) { [int]$cfg["MAX_DOWNLOAD_MINUTES"] } else { 28 }
 $SDDUMP_SESSION_RETRIES = if ($cfg["SDDUMP_SESSION_RETRIES"]) { [int]$cfg["SDDUMP_SESSION_RETRIES"] } else { 5 }
 $OCTOS_LOG_EN = $cfg["OCTOS_OUTPUT_LOG"] -eq 'true'
 $SFTP_HOST    = $cfg["SFTP_HOST"]
@@ -390,6 +391,7 @@ try {
             }
         }
 
+        $budgetReached = $false
         for ($attempt = 1; $attempt -le $MAX_RETRIES; $attempt++) {
             if ($attempt -gt 1) {
                 Write-Log "  Retry $attempt/$MAX_RETRIES after ${RETRY_DELAY}s delay..." "WARN"
@@ -408,6 +410,7 @@ try {
                 -SdlistInSessionRetries $SDLIST_SESSION_RETRIES `
                 -SdlistRetryDelaySec $SDLIST_RETRY_DELAY `
                 -SddumpInSessionRetries $SDDUMP_SESSION_RETRIES `
+                -MaxDownloadMinutes $MAX_DOWNLOAD_MINUTES `
                 -OnStep $onStep -FailureLabel "PHASE 1 attempt $attempt"
 
             if ($result.Success) {
@@ -415,9 +418,20 @@ try {
                 Complete-DashboardAction -Key "phase1_attempt_$attempt" -Status "OK"
                 break
             }
+            if ($result.BudgetReached) {
+                $budgetReached = $true
+                Complete-DashboardAction -Key "phase1_attempt_$attempt" -Status "WARN" -Details "Time budget reached"
+                break
+            }
             # The attempt's safety reboot restarts acquisition; if it was
             # confirmed the instrument is no longer stopped.
             if ($result.SafetyRebootOk) { $needsReboot = $false }
+        }
+
+        if ($budgetReached) {
+            Complete-DashboardAction -Key "phase1" -Status "WARN" -Details "Time budget reached - partial download, no format"
+            Write-Log "Download time budget (${MAX_DOWNLOAD_MINUTES} min) reached - downloaded what we could; skipping verify/format this run." "WARN"
+            Invoke-RebootAndExit 0 "BUDGET"
         }
 
         if (-not $phase1Success) {

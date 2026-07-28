@@ -45,6 +45,7 @@ $MAX_RETRIES  = if ($cfg["MAX_RETRIES"])  { [int]$cfg["MAX_RETRIES"] }  else { 3
 $RETRY_DELAY  = if ($cfg["RETRY_DELAY"])  { [int]$cfg["RETRY_DELAY"] }  else { 10 }
 $SDLIST_SESSION_RETRIES = if ($cfg["SDLIST_SESSION_RETRIES"]) { [int]$cfg["SDLIST_SESSION_RETRIES"] } else { 10 }
 $SDLIST_RETRY_DELAY     = if ($cfg["SDLIST_RETRY_DELAY"]) { [int]$cfg["SDLIST_RETRY_DELAY"] } else { 10 }
+$MAX_DOWNLOAD_MINUTES   = if ($cfg["MAX_DOWNLOAD_MINUTES"]) { [int]$cfg["MAX_DOWNLOAD_MINUTES"] } else { 28 }
 $SDDUMP_SESSION_RETRIES = if ($cfg["SDDUMP_SESSION_RETRIES"]) { [int]$cfg["SDDUMP_SESSION_RETRIES"] } else { 5 }
 $OCTOS_LOG_EN = $cfg["OCTOS_OUTPUT_LOG"] -eq 'true'
 
@@ -95,6 +96,7 @@ try {
 
     $success = $false
     $lastRebootOk = $false
+    $budgetReached = $false
 
     for ($attempt = 1; $attempt -le $MAX_RETRIES; $attempt++) {
         if ($attempt -gt 1) {
@@ -113,13 +115,26 @@ try {
             -SdlistInSessionRetries $SDLIST_SESSION_RETRIES `
             -SdlistRetryDelaySec $SDLIST_RETRY_DELAY `
             -SddumpInSessionRetries $SDDUMP_SESSION_RETRIES `
+            -MaxDownloadMinutes $MAX_DOWNLOAD_MINUTES `
             -RebootAfter -FailureLabel "Attempt $attempt"
 
         if ($result.Success) {
             $success = $true
             break
         }
+        if ($result.BudgetReached) {
+            $budgetReached = $true
+            break
+        }
         $lastRebootOk = $result.SafetyRebootOk
+    }
+
+    if ($budgetReached) {
+        Write-Log "Download time budget (${MAX_DOWNLOAD_MINUTES} min) reached - stopped cleanly, UVP6 rebooted. Progress saved; will continue next run."
+        Write-Log "================================================================="
+        Write-Log "  UVP6 DOWNLOAD - End (BUDGET)"
+        Write-Log "================================================================="
+        exit 0
     }
 
     if (-not $success) {

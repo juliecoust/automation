@@ -601,6 +601,24 @@ function Close-OctOSSession {
 #   'sddump'/'start|ok' sddump began / completed
 #   'attempt'/'error'   attempt failed (detail = error message), sent BEFORE
 #                       the safety reboot so timings stay accurate
+# Counts failed file transmissions in a block of OctOS output. Used for the
+# per-run transfer-failure statistics logged during sdlist/sddump.
+function Count-TransferFailures {
+    param([string]$Output)
+    if (-not $Output) { return 0 }
+    return ([regex]::Matches($Output,
+        'file transmission was incomplete|transmission header not received')).Count
+}
+
+# Counts data files currently in the local filemanager folder, ignoring the
+# tree.txt bookkeeping files. Used to measure download progress vs the SD card.
+function Get-FilemanagerFileCount {
+    param([string]$FilemanagerDir)
+    if (-not (Test-Path $FilemanagerDir)) { return 0 }
+    return @(Get-ChildItem -Path $FilemanagerDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike 'tree*.txt' -and $_.Name -ne 'previous_tree.txt' }).Count
+}
+
 function Invoke-OctOSDownloadAttempt {
     param(
         [string]$OctOSExe,
@@ -615,6 +633,7 @@ function Invoke-OctOSDownloadAttempt {
         [int]$SdlistInSessionRetries = 10,
         [int]$SdlistRetryDelaySec = 10,
         [int]$SddumpInSessionRetries = 5,
+        [int]$MaxDownloadMinutes = 28,
         [switch]$RebootAfter,
         [scriptblock]$OnStep,
         [string]$FailureLabel = "Download attempt"
@@ -631,6 +650,13 @@ function Invoke-OctOSDownloadAttempt {
         Send-StopSequence -Session $session -DelaySec $WaitSecs
         if ($OnStep) { & $OnStep 'stopped' 'ok' }
 
+        # Wall-clock budget for this download session: once exceeded we stop
+        # retrying, reboot (resume acquisition) and return - the instrument is
+        # never held stopped much longer than this. 0 = unlimited.
+        $downloadDeadline = if ($MaxDownloadMinutes -gt 0) { (Get-Date).AddMinutes($MaxDownloadMinutes) } else { $null }
+        $budgetReached = $false
+        $sddumpOk = $false
+
         # sdlist - build fresh SD card file listing.
         # Retries within the same OctOS session WITHOUT rebooting: the tree.txt
         # transfer is a lossy UDP download that frequently needs several attempts
@@ -641,8 +667,14 @@ function Invoke-OctOSDownloadAttempt {
         if ($OnStep) { & $OnStep 'sdlist' 'start' }
         $sdlistOk = $false
         $sdlistTotalAttempts = $SdlistInSessionRetries + 1
+        $sdlistFailedTransfers = 0
         for ($sdlistTry = 1; $sdlistTry -le $sdlistTotalAttempts; $sdlistTry++) {
             if ($sdlistTry -gt 1) {
+                if ($downloadDeadline -and (Get-Date) -gt $downloadDeadline) {
+                    Write-Log "  Time budget (${MaxDownloadMinutes} min) reached during sdlist - stopping retries." "WARN"
+                    $budgetReached = $true
+                    break
+                }
                 Write-Log "  sdlist tree.txt transfer failed - retrying within session ($sdlistTry/$sdlistTotalAttempts) after ${SdlistRetryDelaySec}s..." "WARN"
                 # A longer pause than the usual inter-command delay: each sdlist
                 # re-powers the Processing Unit, and firing them too close can hit
@@ -655,8 +687,10 @@ function Invoke-OctOSDownloadAttempt {
             Write-Log "  .. Waiting for [SDLIST] EXIT (timeout ${SdlistTimeoutSec}s)..."
             $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDLIST\].*EXIT' -TimeoutSec $SdlistTimeoutSec -FromOffset $mark
             if (-not $ok) { throw "Timeout waiting for sdlist to complete." }
+            $sdlistOut = $session.GetOutputFrom($mark)
+            $sdlistFailedTransfers += (Count-TransferFailures $sdlistOut)
             # [SDLIST]: EXIT appears on both success AND error - check the error case explicitly.
-            if ($session.GetOutputFrom($mark) -match 'Command sdlist returned an error') {
+            if ($sdlistOut -match 'Command sdlist returned an error') {
                 Write-Log "  <- sdlist exited with error (tree.txt transfer incomplete)." "WARN"
             } else {
                 $sdlistOk = $true
@@ -664,42 +698,74 @@ function Invoke-OctOSDownloadAttempt {
             }
         }
         if (-not $sdlistOk) {
-            throw "sdlist still failing after $sdlistTotalAttempts in-session attempt(s)."
+            if ($budgetReached) {
+                Write-Log "  sdlist did not complete within the ${MaxDownloadMinutes}-min budget - no listing this run." "WARN"
+            } else {
+                throw "sdlist still failing after $sdlistTotalAttempts in-session attempt(s) ($sdlistFailedTransfers failed transmission(s))."
+            }
+        } else {
+            $sdlistFailPct = [math]::Round(100.0 * $sdlistFailedTransfers / ($sdlistFailedTransfers + 1), 0)
+            Write-Log "  <- sdlist completed on attempt $sdlistTry/$sdlistTotalAttempts - $sdlistFailedTransfers failed transmission(s) before success (~$sdlistFailPct% failure rate)."
+            if ($OnStep) { & $OnStep 'sdlist' 'ok' }
         }
-        Write-Log "  <- sdlist completed."
-        if ($OnStep) { & $OnStep 'sdlist' 'ok' }
 
-        # sddump - download files not yet on disk.
+        # sddump - download files not yet on disk. Only if sdlist produced a
+        # listing this run (skipped when the time budget cut sdlist short).
         # Retries within the same OctOS session: when sddump reports failures,
         # re-running it immediately picks up only the remaining files, avoiding
         # the overhead of a full stop/sdlist/reboot cycle for each retry.
-        Start-Sleep -Seconds $WaitSecs
-        if ($OnStep) { & $OnStep 'sddump' 'start' }
-        $sddumpOk = $false
-        $sddumpTotalAttempts = $SddumpInSessionRetries + 1
-        for ($sddumpTry = 1; $sddumpTry -le $sddumpTotalAttempts; $sddumpTry++) {
-            if ($sddumpTry -gt 1) {
-                Write-Log "  sddump had file failures - retrying within session ($sddumpTry/$sddumpTotalAttempts)..." "WARN"
-                Start-Sleep -Seconds $WaitSecs
+        if ($sdlistOk) {
+            Start-Sleep -Seconds $WaitSecs
+            if ($OnStep) { & $OnStep 'sddump' 'start' }
+            $fmDir     = Join-Path $WorkDir 'filemanager'
+            $treeFile  = Join-Path $fmDir 'tree.txt'
+            $filesBefore = Get-FilemanagerFileCount -FilemanagerDir $fmDir
+            $sddumpTotalAttempts = $SddumpInSessionRetries + 1
+            $sddumpFailedTransfers = 0
+            for ($sddumpTry = 1; $sddumpTry -le $sddumpTotalAttempts; $sddumpTry++) {
+                if ($sddumpTry -gt 1) {
+                    if ($downloadDeadline -and (Get-Date) -gt $downloadDeadline) {
+                        Write-Log "  Time budget (${MaxDownloadMinutes} min) reached during sddump - stopping retries (partial progress kept)." "WARN"
+                        $budgetReached = $true
+                        break
+                    }
+                    Write-Log "  sddump had file failures - retrying within session ($sddumpTry/$sddumpTotalAttempts)..." "WARN"
+                    Start-Sleep -Seconds $WaitSecs
+                }
+                $mark = $session.GetOutputLength()
+                $session.WriteLine("sddump tree.txt")
+                Write-Log "  -> Sent: sddump tree.txt"
+                Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${SddumpTimeoutSec}s)..."
+                $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SddumpTimeoutSec -FromOffset $mark
+                if (-not $ok) { throw "Timeout waiting for sddump to complete." }
+                $sddumpOut = $session.GetOutputFrom($mark)
+                $sddumpFailedTransfers += (Count-TransferFailures $sddumpOut)
+                if ($sddumpOut -match 'Command sddump returned an error') {
+                    Write-Log "  <- sddump exited with errors (some files failed)." "WARN"
+                } else {
+                    $sddumpOk = $true
+                    break
+                }
             }
-            $mark = $session.GetOutputLength()
-            $session.WriteLine("sddump tree.txt")
-            Write-Log "  -> Sent: sddump tree.txt"
-            Write-Log "  .. Waiting for [SDDUMP] EXIT (timeout ${SddumpTimeoutSec}s)..."
-            $ok = Wait-ForMarker -Session $session -MarkerRegex '\[SDDUMP\].*EXIT' -TimeoutSec $SddumpTimeoutSec -FromOffset $mark
-            if (-not $ok) { throw "Timeout waiting for sddump to complete." }
-            if ($session.GetOutputFrom($mark) -match 'Command sddump returned an error') {
-                Write-Log "  <- sddump exited with errors (some files failed)." "WARN"
-            } else {
-                $sddumpOk = $true
-                break
+            if (-not $sddumpOk -and -not $budgetReached) {
+                throw "sddump still has failures after $sddumpTotalAttempts in-session attempt(s) ($sddumpFailedTransfers failed transmission(s))."
             }
+            # Per-run transfer statistics (also logged on a budget-limited partial run).
+            $filesAfter = Get-FilemanagerFileCount -FilemanagerDir $fmDir
+            $downloadedThisRun = [math]::Max(0, $filesAfter - $filesBefore)
+            $sddumpDenom = $sddumpFailedTransfers + $downloadedThisRun
+            $sddumpFailPct = if ($sddumpDenom -gt 0) { [math]::Round(100.0 * $sddumpFailedTransfers / $sddumpDenom, 0) } else { 0 }
+            $sddumpVerb = if ($sddumpOk) { "completed" } else { "stopped on budget" }
+            Write-Log "  <- sddump $sddumpVerb after $sddumpTry run(s): +$downloadedThisRun file(s) this run, $sddumpFailedTransfers failed transmission(s) (~$sddumpFailPct% failure rate)."
+            # Overall backlog progress vs the SD listing (tree.txt = one path per line).
+            $totalListed = @(Get-Content $treeFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() }).Count
+            if ($totalListed -gt 0) {
+                $present = [math]::Min($filesAfter, $totalListed)
+                $pct = [math]::Round(100.0 * $present / $totalListed, 1)
+                Write-Log "  Download progress: $present/$totalListed files on disk ($pct%), $($totalListed - $present) still missing on SD."
+            }
+            if ($sddumpOk -and $OnStep) { & $OnStep 'sddump' 'ok' }
         }
-        if (-not $sddumpOk) {
-            throw "sddump still has failures after $sddumpTotalAttempts in-session attempt(s)."
-        }
-        Write-Log "  <- sddump completed."
-        if ($OnStep) { & $OnStep 'sddump' 'ok' }
 
         if ($RebootAfter) {
             # reboot - resume UVP6 acquisition.
@@ -719,14 +785,14 @@ function Invoke-OctOSDownloadAttempt {
         else              { Write-Log "  -> Sent: quit (UVP6 stays stopped)" }
         $session.WaitForExit(30000) | Out-Null
 
-        return [pscustomobject]@{ Success = $true; SafetyRebootOk = $false; Error = $null }
+        return [pscustomobject]@{ Success = ($sdlistOk -and $sddumpOk); BudgetReached = $budgetReached; SafetyRebootOk = $false; Error = $null }
     }
     catch {
         $errMsg = "$_"
         Write-Log "$FailureLabel FAILED: $errMsg" "ERROR"
         if ($OnStep) { & $OnStep 'attempt' 'error' $errMsg }
         $rebootOk = Send-SafetyReboot -Session $session
-        return [pscustomobject]@{ Success = $false; SafetyRebootOk = $rebootOk; Error = $errMsg }
+        return [pscustomobject]@{ Success = $false; BudgetReached = $false; SafetyRebootOk = $rebootOk; Error = $errMsg }
     }
     finally {
         Close-OctOSSession -Session $session
